@@ -1,4 +1,4 @@
-  """
+"""
 DreamZero inference server for SO-101.
 
 Identical in structure to socket_test_optimized_AR.py but with:
@@ -40,8 +40,16 @@ import http
 import logging
 import os
 import socket
+import sys
 import time
 import traceback
+
+# This script lives in inference/, while project packages such as eval_utils/
+# live at the repository root. Make those imports independent of the caller's
+# current working directory.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 import imageio
 import numpy as np
