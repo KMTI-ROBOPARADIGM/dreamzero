@@ -64,7 +64,7 @@ VALID_EMBODIMENT_TAGS = [
     "agibot", "lapa", "oxe_mutex", "oxe_roboset", "oxe_plex",
     "dream", "yam", "xdof",
     "gr1_unified_segmentation", "language_table_sim", "gr1_isaac",
-    "sim_behavior_r1_pro", "mecka_hands", "real_r1_pro_sharpa",
+    "sim_behavior_r1_pro", "mecka_hands", "real_r1_pro_sharpa", "so101"
 ]
 
 
@@ -83,6 +83,9 @@ def load_info(dataset_path: Path) -> dict:
 
 def get_parquet_paths(dataset_path: Path, info: dict) -> list[Path]:
     pattern = info.get("data_path", "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet")
+    if "{file_index" in pattern or "{chunk_index" in pattern:
+        return sorted(dataset_path.glob("data/chunk-*/*.parquet"))
+
     total_episodes = info["total_episodes"]
     chunks_size = info.get("chunks_size", 1000)
     paths = []
@@ -126,6 +129,24 @@ def parse_key_mapping(raw: str | None) -> dict[str, list[int]] | None:
     return mapping
 
 
+def parse_video_mapping(raw: str | None) -> dict[str, str] | None:
+    """Parse a JSON mapping from DreamZero view names to LeRobot video columns."""
+    if raw is None:
+        return None
+    try:
+        mapping = json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.error("Invalid JSON for video mapping: %s", e)
+        sys.exit(1)
+    if not isinstance(mapping, dict) or not all(
+        isinstance(name, str) and isinstance(column, str)
+        for name, column in mapping.items()
+    ):
+        log.error("--video-keys must be a JSON object mapping names to columns")
+        sys.exit(1)
+    return mapping
+
+
 # ---------------------------------------------------------------------------
 # Modality JSON
 # ---------------------------------------------------------------------------
@@ -135,6 +156,7 @@ def build_modality_json(
     detected: dict,
     state_mapping: dict[str, list[int]] | None,
     action_mapping: dict[str, list[int]] | None,
+    video_mapping: dict[str, str] | None,
     task_key: str | None,
 ) -> dict:
     """Build the modality.json structure expected by GEAR/DreamZero."""
@@ -198,14 +220,25 @@ def build_modality_json(
         }
 
     # --- Video ---
-    for vk in detected["video"]:
-        short_name = vk.replace("observation.images.", "")
-        modality["video"][short_name] = {"original_key": vk}
+    if video_mapping:
+        for short_name, original_key in video_mapping.items():
+            if original_key not in detected["video"]:
+                raise ValueError(
+                    f"Video column '{original_key}' is not present in meta/info.json"
+                )
+            modality["video"][short_name] = {"original_key": original_key}
+    else:
+        for vk in detected["video"]:
+            short_name = vk.replace("observation.images.", "")
+            modality["video"][short_name] = {"original_key": vk}
 
     # --- Annotation ---
     if task_key:
-        short = task_key.replace("annotation.", "")
-        modality["annotation"][short] = {"original_key": task_key}
+        if task_key == 'task_index':
+            modality['annotation']['task'] = {'original_key': 'task_index'}
+        else:
+            short = task_key.replace('annotation.', '')
+            modality['annotation'][short] = {'original_key': task_key}
     else:
         for ak in detected["annotation"]:
             short = ak.replace("annotation.", "")
@@ -330,6 +363,17 @@ def build_tasks(parquet_paths: list[Path], task_key: str | None) -> list[dict]:
     if task_key is None:
         return [{"task_index": 0, "task": ""}]
 
+    # LeRobot v2: task_index column + tasks.jsonl lookup
+    if task_key == 'task_index':
+        import json as _json
+        tasks_jsonl = parquet_paths[0].parent.parent / 'meta' / 'tasks.jsonl'
+        if tasks_jsonl.exists():
+            tasks = []
+            with open(tasks_jsonl) as f:
+                for line in f:
+                    tasks.append(_json.loads(line.strip()))
+            return tasks
+
     task_set: dict[str, int] = {}
     for pp in tqdm(parquet_paths, desc="Extracting tasks"):
         df = pd.read_parquet(pp)
@@ -350,17 +394,33 @@ def build_episodes(parquet_paths: list[Path], info: dict, task_key: str | None, 
     """Build episodes.jsonl entries."""
     task_text_to_idx = {t["task"]: t["task_index"] for t in tasks}
     episodes = []
-    for ep_idx, pp in enumerate(tqdm(parquet_paths, desc="Building episodes")):
+    episode_frames = []
+    for pp in parquet_paths:
         df = pd.read_parquet(pp)
+        if "episode_index" in df.columns:
+            episode_frames.extend(
+                (int(ep_idx), ep_df)
+                for ep_idx, ep_df in df.groupby("episode_index", sort=True)
+            )
+        else:
+            episode_frames.append((len(episode_frames), df))
+    for ep_idx, df in tqdm(episode_frames, desc="Building episodes"):
         length = len(df)
 
         ep_tasks: list[str] = []
         if task_key and task_key in df.columns:
-            unique_tasks = df[task_key].unique()
-            for t in unique_tasks:
-                text = str(t) if not isinstance(t, str) else t
-                if text and text in task_text_to_idx:
-                    ep_tasks.append(text)
+            if task_key == 'task_index':
+                idx_to_text = {t['task_index']: t['task'] for t in tasks}
+                for t in df[task_key].unique():
+                    text = idx_to_text.get(int(t), '')
+                    if text:
+                        ep_tasks.append(text)
+            else:
+                unique_tasks = df[task_key].unique()
+                for t in unique_tasks:
+                    text = str(t) if not isinstance(t, str) else t
+                    if text and text in task_text_to_idx:
+                        ep_tasks.append(text)
         if not ep_tasks:
             ep_tasks = [""]
 
@@ -433,6 +493,10 @@ def main():
         help='JSON mapping of action sub-keys to [start, end] index ranges'
     )
     parser.add_argument(
+        "--video-keys", type=str, default=None,
+        help='JSON mapping of DreamZero view names to LeRobot video columns'
+    )
+    parser.add_argument(
         "--relative-action-keys", type=str, nargs="*", default=None,
         help="Action sub-key names to compute relative stats for (e.g. joint_pos gripper_pos). "
              "Each key must also exist in --state-keys. If omitted, skips relative stats."
@@ -497,6 +561,7 @@ def main():
     # Parse user-provided key mappings
     state_mapping = parse_key_mapping(args.state_keys)
     action_mapping = parse_key_mapping(args.action_keys)
+    video_mapping = parse_video_mapping(args.video_keys)
 
     # Auto-detect task key if not provided
     task_key = args.task_key
@@ -510,7 +575,14 @@ def main():
         log.info("  Auto-detected task key: %s", task_key)
 
     # 2. Build modality.json
-    modality = build_modality_json(info, detected, state_mapping, action_mapping, task_key)
+    modality = build_modality_json(
+        info,
+        detected,
+        state_mapping,
+        action_mapping,
+        video_mapping,
+        task_key,
+    )
 
     modality_path = meta_dir / "modality.json"
     if modality_path.exists() and not args.force:

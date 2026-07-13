@@ -1,0 +1,12 @@
+# Project dependencies are declared and pinned in pyproject.toml.
+# This extra index provides the CUDA 12.9 PyTorch wheels used by DreamZero.
+--extra-index-url https://download.pytorch.org/whl/cu129
+
+-e .
+
+# Direct dependencies used by the distributed socket inference server.
+websockets>=13,<17
+huggingface_hub[cli]>=0.30
+
+# Install FlashAttention separately as documented in README.md because it
+# requires PyTorch to be installed first and uses --no-build-isolation.

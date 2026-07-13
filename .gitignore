@@ -244,3 +244,30 @@ groot/control/envs/yam/data/eval/*
 
 checkpoints/
 video_pred_output*/
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+
+# Model weights and local SO-101 datasets
+/so101-megamix-v1*/
+/so101-table-cleanup/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.trt
+
+# Generated SO-101 inference/training artifacts
+*.mp4
+/output.csv
+/stdout.log
+/stderr.log
+/training_script_runner.txt
+*.orig
+/changes.diff
+/environment-dream-linux-64.lock
+
+# Local installers
+/Miniforge3-Linux-*.sh

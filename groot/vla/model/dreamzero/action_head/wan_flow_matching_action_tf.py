@@ -177,7 +177,7 @@ class WANPolicyHead(ActionHead):
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
         self.model_names = ['text_encoder']
 
-        self.num_inference_steps = 16 
+        self.num_inference_steps = 16
         self.seed = 1140
         self.cfg_scale = 5.0
         self.denoising_strength = 1.0
@@ -202,7 +202,7 @@ class WANPolicyHead(ActionHead):
         self.ip_rank = 0
         self.ip_size = 1
         self.ip_group = None
-        
+
         self._device = "cuda"
         self.dynamic_cache_schedule = os.getenv("DYNAMIC_CACHE_SCHEDULE", "False").lower() == "true"
 
@@ -228,8 +228,8 @@ class WANPolicyHead(ActionHead):
         self.use_gradient_checkpointing = config.use_gradient_checkpointing
         if self.training:
             self.scheduler.set_timesteps(1000, training=True)
-        
-        
+
+
         self.input_embedding_dim = config.input_embedding_dim
 
         self.cpu_offload = False
@@ -238,7 +238,7 @@ class WANPolicyHead(ActionHead):
         self.action_dim = config.action_dim
         self.action_horizon = config.action_horizon
         self.num_inference_timesteps = config.num_inference_timesteps
-        
+
         text_enc_path = ensure_file(
             self.text_encoder.text_encoder_pretrained_path,
             "models_t5_umt5-xxl-enc-bf16.pth",
@@ -370,13 +370,13 @@ class WANPolicyHead(ActionHead):
         trainable_params = []
         total_params = 0
         trainable_total = 0
-        
+
         for name, param in self.model.named_parameters():
             total_params += param.numel()
             if param.requires_grad:
                 trainable_params.append(name)
                 trainable_total += param.numel()
-                
+
         print(f"Total parameters in diffusion model: {total_params:,}")
         print(f"Trainable parameters in diffusion model: {trainable_total:,}")
         # print(trainable_params)
@@ -403,7 +403,7 @@ class WANPolicyHead(ActionHead):
             self.model.action_decoder.requires_grad_(True)
             # self.model.registers.requires_grad_(True)
             # self.model.time_modality_projection.requires_grad_(True)
-            
+
             self.text_encoder.requires_grad_(False)
             self.image_encoder.requires_grad_(False)
             self.vae.requires_grad_(False)
@@ -423,8 +423,8 @@ class WANPolicyHead(ActionHead):
             self.text_encoder.eval()
             self.image_encoder.eval()
             self.vae.eval()
-    
-    
+
+
     def enable_vram_management(self, num_persistent_param_in_dit=None):
         dtype = next(iter(self.text_encoder.parameters())).dtype
         enable_vram_management(
@@ -527,7 +527,7 @@ class WANPolicyHead(ActionHead):
             )
 
         return crossattn_cache, crossattn_cache_neg
-        
+
     def sample_time(self, batch_size, device, dtype):
         sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
         return (self.config.noise_s - sample) / self.config.noise_s
@@ -579,7 +579,7 @@ class WANPolicyHead(ActionHead):
             # concat: B * (4+16) * (1+(T-1)/4) * H_latent * W_latent
             y = torch.concat([msk, y], dim=1)
         return clip_context, y, new_image
-    
+
     def prepare_extra_input(self, latents=None):
         return {}
 
@@ -604,7 +604,7 @@ class WANPolicyHead(ActionHead):
         # Set frozen modules to eval
         self.set_frozen_modules_to_eval_mode()
 
-        data = action_input 
+        data = action_input
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
         # print("embodiment_id", embodiment_id)
@@ -621,7 +621,7 @@ class WANPolicyHead(ActionHead):
 
         videos = rearrange(videos, "b t h w c -> b c t h w")
         print("videos", videos.shape)
-        
+
 
         if videos.dtype == torch.uint8:
             videos = videos.float() / 255.0
@@ -632,7 +632,7 @@ class WANPolicyHead(ActionHead):
             videos = videos.reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4)  # back to [b, c, t, h, w]
             assert videos.min() >= -1.0 and videos.max() <= 1.0, "videos must be in [-1,1] range"
             videos = videos.to(dtype=self.dtype)
-        
+
         # shape of B * max_length * dim
         prompt_embs = self.encode_prompt(data["text"], data["text_attention_mask"])
 
@@ -668,14 +668,14 @@ class WANPolicyHead(ActionHead):
         clip_feas = clip_feas.to(self._device)
         ys = ys.to(self._device)
         prompt_embs = prompt_embs.to(self._device)
-       
+
         # Loss
         noise = torch.randn_like(latents)
 
-        # specific to autoregressive 
+        # specific to autoregressive
         noise = noise.transpose(1, 2)
         latents = latents.transpose(1, 2)
-        
+
         # ============ VIDEO TIMESTEP SAMPLING ============
         if self.config.decouple_video_action_noise:
             # Decoupled mode: sample video from Beta distribution biased towards HIGH noise
@@ -693,22 +693,22 @@ class WANPolicyHead(ActionHead):
             # Original: uniform sampling over full range
             timestep_id = torch.randint(0, self.scheduler.num_train_timesteps, (noise.shape[0], noise.shape[1]))
             noise_mode = "STANDARD"
-        
+
         timestep_id_block = timestep_id[:, 1:].reshape(
                     timestep_id.shape[0], -1, self.num_frame_per_block)
         timestep_id_block[:, :, 1:] = timestep_id_block[:, :, 0:1]
-        
+
         if actions.numel() > 0:
             noise_action = torch.randn_like(actions)
             assert actions.shape[1] / (noise.shape[1]-1) == (self.model.num_action_per_block // self.num_frame_per_block), f"actions.shape, {actions.shape}, noise.shape, {noise.shape}, video.shape, {videos.shape}, latents.shape, {latents.shape}"
             assert (noise.shape[1]-1) / state_features.shape[1] == (self.num_frame_per_block // self.model.num_state_per_block), f"state_features.shape, {state_features.shape}, noise.shape, {noise.shape}, video.shape, {videos.shape}, latents.shape, {latents.shape}"
-            
+
             # ============ ACTION TIMESTEP SAMPLING ============
             if self.config.decouple_video_action_noise:
                 # Decoupled: sample action timestep independently with full range
                 timestep_action_id = torch.randint(
-                    0, 
-                    self.scheduler.num_train_timesteps, 
+                    0,
+                    self.scheduler.num_train_timesteps,
                     (actions.shape[0], actions.shape[1])
                 )
                 action_mode = "INDEPENDENT"
@@ -717,7 +717,7 @@ class WANPolicyHead(ActionHead):
                 timestep_action_id = timestep_id_block.repeat(1, 1, actions.shape[1]//(noise.shape[1]-1))
                 timestep_action_id = timestep_action_id.reshape(timestep_action_id.shape[0], -1)
                 action_mode = "COUPLED"
-            
+
             # Log noise mode once
             if not self._noise_logged:
                 video_mean = timestep_id.float().mean().item()
@@ -732,7 +732,7 @@ class WANPolicyHead(ActionHead):
         else:
             noise_action = None
             timestep_action_id = None
-            
+
         timestep_id_block = timestep_id_block.reshape(timestep_id_block.shape[0], -1)
         timestep_id = torch.concat([timestep_id[:, :1], timestep_id_block], dim=1)
         _, num_frames, num_channels, height, width = noise.shape
@@ -743,7 +743,7 @@ class WANPolicyHead(ActionHead):
         timestep = self.scheduler.timesteps[timestep_id].to(self._device)
         noisy_latents = self.scheduler.add_noise(latents.flatten(0, 1), noise.flatten(0, 1), timestep.flatten(0, 1)).unflatten(0, (noise.shape[0], noise.shape[1]))
         training_target = self.scheduler.training_target(latents, noise, timestep).transpose(1, 2)
-        
+
         if actions.numel() > 0:
             timestep_action = self.scheduler.timesteps[timestep_action_id].to(self._device)
             noisy_actions = self.scheduler.add_noise(
@@ -763,12 +763,12 @@ class WANPolicyHead(ActionHead):
                 video_noise_pred, action_noise_pred = self.model(
                     noisy_latents.transpose(1, 2), timestep=timestep, clip_feature=clip_feas, y=ys, context=prompt_embs, seq_len=seq_len,
                     state=state_features, embodiment_id=embodiment_id,
-                    action=noisy_actions, timestep_action=timestep_action, 
+                    action=noisy_actions, timestep_action=timestep_action,
                     clean_x=latents.transpose(1, 2),
                 )
             else:
                 video_noise_pred, action_noise_pred = self.model(
-                    noisy_latents.transpose(1, 2), timestep=timestep, timestep_action=timestep_action, 
+                    noisy_latents.transpose(1, 2), timestep=timestep, timestep_action=timestep_action,
                     clip_feature=clip_feas, y=ys, context=prompt_embs, seq_len=seq_len,
                     state=state_features, embodiment_id=embodiment_id,
                     clean_x=latents.transpose(1, 2),
@@ -787,12 +787,12 @@ class WANPolicyHead(ActionHead):
 
             weight_dynamics = dynamics_loss_per_sample * self.scheduler.training_weight(timestep.flatten(0, 1)).unflatten(0, (noise.shape[0], noise.shape[1])).to(self._device)
             weighted_dynamics_loss = weight_dynamics.mean()
-            
+
             if actions.numel() > 0:
                 action_loss_per_sample = torch.nn.functional.mse_loss(
                     action_noise_pred.float(), training_target_action.float(), reduction='none'
                 ) * action_mask  # shape: [B, ...]
-                action_loss_per_sample = has_real_action[:, None].float() * action_loss_per_sample  # apply has_real_action
+                action_loss_per_sample = has_real_action[:, None, None].float() * action_loss_per_sample  # apply has_real_action
                 weight_action = action_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)
@@ -816,7 +816,7 @@ class WANPolicyHead(ActionHead):
         generator = None if seed is None else torch.Generator(device).manual_seed(seed)
         noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
         return noise
-    
+
     def _get_caches(
         self, kv_caches_input: list[KVCacheType],
     ) -> list[KVCacheType]:
@@ -939,7 +939,7 @@ class WANPolicyHead(ActionHead):
         output_predictions[(self.ip_rank + 1) % self.ip_size] = tuple(other_predictions)
         assert all(isinstance(pred, tuple) for pred in output_predictions)
         return cast(list[tuple[torch.Tensor, torch.Tensor]], output_predictions)
-    
+
     def should_run_model(self, index, current_timestep, prev_predictions):
 
         if not self.dynamic_cache_schedule:
@@ -953,7 +953,7 @@ class WANPolicyHead(ActionHead):
             self.skip_countdown -= 1
             return False
         elif self.skip_countdown == 1:
-            self.skip_countdown = 0 
+            self.skip_countdown = 0
             return True
 
         v_last = prev_predictions[-1][1].flatten(1).float()
@@ -986,8 +986,8 @@ class WANPolicyHead(ActionHead):
         end_diffusion_events = [torch.cuda.Event(enable_timing=True) for _ in range(self.num_inference_steps)]
 
         self.set_frozen_modules_to_eval_mode()
-        data = action_input 
-        
+        data = action_input
+
         videos = data["images"]
 
         embodiment_id = action_input.embodiment_id
@@ -1052,7 +1052,7 @@ class WANPolicyHead(ActionHead):
         prompt_embs = [self.encode_prompt(text, attention_mask) for text, attention_mask in text_inputs]
 
         end_text_encoder_event.record()
-        
+
         start_image_encoder_event.record()
 
         _, _, num_frames, height, width = videos.shape
@@ -1066,7 +1066,7 @@ class WANPolicyHead(ActionHead):
             clip_feas, ys, image = self.encode_image(image, self.num_frames, height, width)
             self.clip_feas = clip_feas.to(dtype=image.dtype)
             self.ys = ys.to(dtype=image.dtype)
-        
+
         assert self.clip_feas is not None and self.ys is not None, "clip_feas and ys must be set"
 
         end_image_encoder_event.record()
@@ -1085,13 +1085,13 @@ class WANPolicyHead(ActionHead):
                 # Repeating videos along dim 2.
                 repeat_factor = self.num_frame_per_block // (videos.shape[2] // 4)
                 videos = torch.repeat_interleave(videos, repeat_factor, dim=2)
-            
+
                 first_frame = videos[:, :, 0:1]  # Extract first frame
                 videos = torch.cat([first_frame, videos], dim=2)
-            else: 
+            else:
                 first_frame = videos[:, :, 0:1]  # Extract first frame
                 videos = torch.cat([first_frame, videos], dim=2)
-           
+
             image = self.vae.encode(
                 videos,
                 tiled=self.tiled,
@@ -1161,7 +1161,7 @@ class WANPolicyHead(ActionHead):
                 ),
             )
             self.current_start_frame += 1
-            
+
         timestep = torch.ones([batch_size, self.num_frame_per_block], device=noise_obs.device, dtype=torch.int64) * 0
 
         if self.current_start_frame != 1:
@@ -1210,7 +1210,7 @@ class WANPolicyHead(ActionHead):
             self.num_inference_steps, device=noise_obs.device, shift=self.sigma_shift)
 
         # Decoupled inference: video sigmas end at video_final_noise instead of 0
-        # This rescales the schedule so video still takes all denoising steps, 
+        # This rescales the schedule so video still takes all denoising steps,
         # but ends at a higher noise level (e.g., 1.0 → 0.9 → 0.8 instead of 1.0 → 0.5 → 0.0)
         if self.config.decouple_inference_noise:
             video_final_noise = self.config.video_inference_final_noise
@@ -1223,7 +1223,7 @@ class WANPolicyHead(ActionHead):
 
         start_diffusion_events = [torch.cuda.Event(enable_timing=True) for _ in sample_scheduler.timesteps]
         end_diffusion_events = [torch.cuda.Event(enable_timing=True) for _ in sample_scheduler.timesteps]
-        prev_predictions = [] 
+        prev_predictions = []
         self.skip_countdown = 0
         dit_compute_steps = 0
         for index, current_timestep in enumerate(sample_scheduler.timesteps):
@@ -1294,7 +1294,7 @@ class WANPolicyHead(ActionHead):
                 step_index=index,
                 return_dict=False,
             )[0]
-            
+
             # Action: always fully denoises with standard schedule (1000->0)
             noisy_input_action = sample_scheduler_action.step(
                 model_output=flow_pred_cond_action,
@@ -1336,14 +1336,14 @@ class WANPolicyHead(ActionHead):
                   f"Scheduler {scheduler_time:.2f} seconds")
 
         return BatchFeature(data={"action_pred": latents_action, "video_pred": output.transpose(1, 2)})
-    
+
     def cache_predict_order1(self, current_timestep, timestep_1, f1, timestep_2, f2):
         h_curr = current_timestep - timestep_1
         h_past = timestep_1 - timestep_2
 
         v_prime = (f1 - f2) / h_past
 
-        # Prediction 
+        # Prediction
         damping_factor = 0.25
         flow_pred = f1 + (v_prime * h_curr) * damping_factor
         return flow_pred
@@ -1375,7 +1375,7 @@ class WANPolicyHead(ActionHead):
             self.vae.model.encode = torch.compile(
                 mode="reduce-overhead", fullgraph=True, dynamic=False,
             )(self.vae.model.encode)
-        
+
         self.trt_engine = None
         if LOAD_TRT_ENGINE is not None:
             print(f"Loading TRT engine from {LOAD_TRT_ENGINE}")

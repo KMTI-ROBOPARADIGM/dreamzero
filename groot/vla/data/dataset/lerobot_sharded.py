@@ -538,6 +538,46 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         assert self.shard_start_indices is not None
         return list(self.shard_start_indices.keys())
 
+    def filter_full_chunk_starts(
+        self, trajectory_id: int, candidate_indices: np.ndarray
+    ) -> np.ndarray:
+        """Keep starts with four complete action blocks and 33 video frames."""
+        action_steps = 24 * self.max_chunk_size
+        required_frames = action_steps + 1
+        trajectory_data = self.get_trajectory_data(trajectory_id)
+        trajectory_length = len(trajectory_data)
+
+        candidates = np.asarray(candidate_indices, dtype=int)
+        candidates = candidates[
+            (candidates >= 0)
+            & (candidates + required_frames <= trajectory_length)
+        ]
+        if len(candidates) == 0:
+            return candidates
+
+        language_key = None
+        for modality_keys in self.modality_keys.values():
+            for modality_key in modality_keys:
+                if modality_key.startswith("annotation."):
+                    subkey = modality_key.replace("annotation.", "")
+                    language_key = self.lerobot_modality_meta.annotation[
+                        subkey
+                    ].original_key
+                    break
+            if language_key is not None:
+                break
+
+        if language_key is None or language_key not in trajectory_data.columns:
+            return candidates
+
+        language = trajectory_data[language_key].to_numpy()
+        valid = [
+            start
+            for start in candidates
+            if np.all(language[start : start + required_frames] == language[start])
+        ]
+        return np.asarray(valid, dtype=int)
+
     def get_step_data(self, trajectory_id: int, indices: dict[str, np.ndarray]) -> dict:
         """Get the RAW data for a single step in a trajectory. No transforms are applied.
 
@@ -1491,17 +1531,11 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
             self.cache_next_shard()
             all_steps: list[tuple[int, int]] = []
             for trajectory_id in dataset.get_trajectories_in_shard():
-                trajectory_index = dataset.get_trajectory_index(trajectory_id)
-                if self.allow_padding_at_end:
-                    allowed_length = dataset.trajectory_lengths[trajectory_index]
-                else:
-                    max_delta_index = dataset.max_delta_index
-                    trajectory_length = dataset.trajectory_lengths[trajectory_index]
-                    allowed_length = trajectory_length - max_delta_index
-                # Get the allowed indices from the step filter
                 allowed_indices = dataset.step_filter[trajectory_id]
-                # Remove indices that are too large
-                allowed_indices = allowed_indices[allowed_indices <= allowed_length]
+                if hasattr(dataset, "filter_full_chunk_starts"):
+                    allowed_indices = dataset.filter_full_chunk_starts(
+                        trajectory_id, allowed_indices
+                    )
                 for i in allowed_indices:
                     all_steps.append((trajectory_id, i))
             if self.training:
@@ -1511,6 +1545,7 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
                 # print(
                 #     f"Loading step data from rank {self.rank}, worker {self.worker_id}: {dataset_index} {trajectory_id}, {step_index}"
                 # )
+                dataset.validate_action_window(trajectory_id, step_index)
                 indices = {
                     key: delta_indices + step_index
                     for key, delta_indices in dataset.delta_indices.items()

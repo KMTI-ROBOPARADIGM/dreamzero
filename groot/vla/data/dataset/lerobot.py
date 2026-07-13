@@ -212,11 +212,20 @@ class LeRobotSingleDataset(Dataset):
         print("relative_action_per_horizon", self.relative_action_per_horizon)
         self._lerobot_relative_horizon_stats_meta = self._get_lerobot_relative_horizon_stats_meta() if self.relative_action_per_horizon else {}
         self._metadata = self._get_metadata()
-        self._step_filter = self._get_step_filter()
-        self._all_steps = self._get_all_steps()
         self._modality_keys = self._get_modality_keys()
         self._delta_indices = self._get_delta_indices()
         self._max_delta_index = self._get_max_delta_index()
+        action_config = self.modality_configs.get("action")
+        if action_config is None or not action_config.delta_indices:
+            raise ValueError("An action modality with at least one delta index is required")
+        action_delta_indices = np.asarray(action_config.delta_indices)
+        if action_delta_indices.min() < 0:
+            raise ValueError(
+                f"Action delta indices must be non-negative, got {action_config.delta_indices}"
+            )
+        self._action_horizon = int(action_delta_indices.max()) + 1
+        self._step_filter = self._get_step_filter()
+        self._all_steps = self._get_all_steps()
         self._dataset_name = self._dataset_path.name
 
         # NOTE(YL): method to predict the task progress
@@ -973,23 +982,54 @@ class LeRobotSingleDataset(Dataset):
             return None
 
     def _get_step_filter(self) -> dict[int, np.ndarray]:
-        """Get the step filter for the dataset."""
+        """Get valid action-window starts, excluding any configured bad steps."""
         step_filter_path = self.dataset_path / STEP_FILTER_FILENAME
-        step_filter = {}
+        id_to_pos = {int(tid): i for i, tid in enumerate(self.trajectory_ids)}
+        step_filter = {
+            int(trajectory_id): np.arange(
+                max(
+                    0,
+                    int(self.trajectory_lengths[id_to_pos[int(trajectory_id)]])
+                    - self.action_horizon
+                    + 1,
+                )
+            )
+            for trajectory_id in self.trajectory_ids
+        }
         if step_filter_path.exists():
             with open(step_filter_path, "r") as f:
                 for line in f:
                     episode_step_filter = json.loads(line)
-                    trajectory_id = episode_step_filter["episode_index"]
-                    all_indices = np.arange(self.trajectory_lengths[trajectory_id].item())
+                    trajectory_id = int(episode_step_filter["episode_index"])
+                    if trajectory_id not in step_filter:
+                        continue
                     indices_to_filter = np.array(episode_step_filter["step_indices"])
-                    step_filter[trajectory_id] = np.setdiff1d(all_indices, indices_to_filter)
-        else:
-            for trajectory_id in self.trajectory_ids:
-                step_filter[trajectory_id] = np.arange(
-                    self.trajectory_lengths[trajectory_id].item()
-                )
+                    step_filter[trajectory_id] = np.setdiff1d(
+                        step_filter[trajectory_id], indices_to_filter
+                    )
         return step_filter
+
+    @property
+    def action_horizon(self) -> int:
+        """Number of consecutive action steps required by one sample."""
+        return self._action_horizon
+
+    def validate_action_window(self, trajectory_id: int, base_index: int) -> None:
+        """Assert that base_index has a complete action horizon available."""
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        trajectory_length = int(self.trajectory_lengths[trajectory_index])
+        assert 0 <= base_index <= trajectory_length - self.action_horizon, (
+            f"Invalid action window: {trajectory_id=}, {base_index=}, "
+            f"{trajectory_length=}, {self.action_horizon=}"
+        )
+        action_config = self.modality_configs["action"]
+        action_indices = base_index + np.asarray(action_config.delta_indices)
+        assert len(action_indices) == self.action_horizon, (
+            f"Expected {self.action_horizon} action indices, got {len(action_indices)}"
+        )
+        assert action_indices.max() < trajectory_length, (
+            f"Action window exceeds episode: {action_indices.max()=}, {trajectory_length=}"
+        )
 
     def _get_metadata(self) -> DatasetMetadata:
         """Get the metadata for the dataset.
@@ -1286,6 +1326,7 @@ class LeRobotSingleDataset(Dataset):
             dict: The data for the step.
         """
         trajectory_id, base_index = self.all_steps[index]
+        self.validate_action_window(trajectory_id, base_index)
         indices = {
             key: delta_indices + base_index for key, delta_indices in self.delta_indices.items()
         }
@@ -2184,38 +2225,12 @@ class LeRobotMixtureDataset(Dataset):
             dataset_index = rng.choice(len(self.datasets), p=self.dataset_sampling_weights)
             dataset = self.datasets[dataset_index]
 
-            if self.allow_padding_at_end:
-                # Sample trajectory
-                trajectory_index = rng.choice(
-                    len(dataset.trajectory_ids), p=self.trajectory_sampling_weights[dataset_index]
-                )
-                trajectory_id = dataset.trajectory_ids[trajectory_index]
-
-                allowed_length = dataset.trajectory_lengths[trajectory_index]
-            else:
-                # Avoid padding at the end of the trajectory
-                max_delta_index = dataset.max_delta_index
-                trajectory_length = 0
-                trajectory_id = None
-                while trajectory_length < max_delta_index + 1:
-                    # Sample trajectory
-                    trajectory_index = rng.choice(
-                        len(dataset.trajectory_ids),
-                        p=self.trajectory_sampling_weights[dataset_index],
-                    )
-                    trajectory_id = dataset.trajectory_ids[trajectory_index]
-                    trajectory_length = dataset.trajectory_lengths[trajectory_index]
-                assert trajectory_id is not None
-
-                # Sample step
-                assert (
-                    trajectory_length >= max_delta_index + 1
-                ), f"{trajectory_length=}, {max_delta_index=}"
-                allowed_length = trajectory_length - max_delta_index
-            # Get the allowed indices from the step filter
+            trajectory_index = rng.choice(
+                len(dataset.trajectory_ids), p=self.trajectory_sampling_weights[dataset_index]
+            )
+            trajectory_id = dataset.trajectory_ids[trajectory_index]
             allowed_indices = dataset.step_filter[trajectory_id]
-            # Remove indices that are too large
-            allowed_indices = allowed_indices[allowed_indices <= allowed_length]
+            assert len(allowed_indices) > 0, f"No valid action windows for {trajectory_id=}"
             step_index = rng.choice(allowed_indices)
             return dataset, trajectory_id, step_index
         else:
@@ -2238,6 +2253,7 @@ class LeRobotMixtureDataset(Dataset):
             dict: The data for the trajectory and start index.
         """
         dataset, trajectory_id, step_index = self.sample_step(index)
+        dataset.validate_action_window(trajectory_id, step_index)
         indices = {
             key: delta_indices + step_index for key, delta_indices in dataset.delta_indices.items()
         }

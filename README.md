@@ -78,7 +78,7 @@ conda activate dreamzero
 
 2. **Install dependencies (PyTorch 2.8+ with CUDA 12.9+):**
 ```bash
-pip install -e . --extra-index-url https://download.pytorch.org/whl/cu129
+pip install -r requirements.txt
 ```
 
 3. **Install flash attention:**
@@ -242,6 +242,84 @@ The training script uses Hydra for configuration and DeepSpeed ZeRO Stage 2 for 
 | `bf16` | true | Use bfloat16 precision |
 
 > **Note:** `max_steps=10` is set for a quick sanity check. For full training, increase this to your desired number of steps and configure `save_steps` / `save_strategy` accordingly.
+
+
+## SO-101 fine-tuning and inference
+
+SO-101 uses a six-dimensional state/action space (five arm joints and one
+gripper joint) with front and wrist camera observations. The included data
+configuration trains a LoRA adapter from the DreamZero-AgiBot checkpoint.
+
+### Fine-tuning
+
+Prepare a GEAR-format SO-101 dataset, activate the DreamZero environment, and
+launch training from the repository root:
+
+```bash
+conda activate dream
+
+SO101_DATA_ROOT=/path/to/so101_gear \
+OUTPUT_DIR=./checkpoints/dreamzero_so101_lora \
+NUM_GPUS=2 \
+bash scripts/train/so101_training.sh
+```
+
+The script downloads Wan2.1 and UMT5 weights when they are missing. Override
+`WAN_CKPT_DIR`, `TOKENIZER_DIR`, or the
+training-script defaults directly when needed.
+
+### Inference server
+
+Start the distributed server in the `dream` environment. The number of
+processes must match the number of visible GPUs; the following command exposes
+two GPUs and therefore starts two workers:
+
+```bash
+export LD_LIBRARY_PATH=/home/ubuntu/miniforge3/envs/dream/lib/python3.11/site-packages/torch/lib:$LD_LIBRARY_PATH
+
+CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run \
+    --standalone \
+    --nproc_per_node=2 \
+    socket_so101.py \
+    --model-path ./checkpoints/dreamzero_so101_lora/ \
+    --port 5000 \
+    --enable-dit-cache
+```
+
+For four workers, expose four GPUs with `CUDA_VISIBLE_DEVICES=0,1,2,3` and set
+`--nproc_per_node=4`.
+
+### Smoke test
+
+After the server finishes loading, run the synthetic client in another
+terminal:
+
+```bash
+export LD_LIBRARY_PATH=/home/ubuntu/miniforge3/envs/dream/lib/python3.11/site-packages/torch/lib:$LD_LIBRARY_PATH
+python test_client_so101.py --host localhost --port 5000 --steps 3 --random-images
+```
+
+### LeIsaac client
+
+Run the robot client from the LeIsaac project in a third terminal. The client
+script is maintained by that project and is not included here:
+
+```bash
+export LD_LIBRARY_PATH=/home/ubuntu/miniforge3/envs/leisaac/lib/python3.11/site-packages/torch/lib:$LD_LIBRARY_PATH
+
+python dreamzero_so101_client.py \
+    --enable_cameras \
+    --host 127.0.0.1 \
+    --port 5000 \
+    --task "pick up the orange" \
+    --episodes 2 \
+    > >(tee stdout.log) \
+    2> >(tee stderr.log >&2)
+```
+
+The server writes generated rollout videos beneath the selected checkpoint
+directory. Ensure the configured 480x640 input resolution and camera ordering
+match the SO-101 dataset and LeIsaac cameras.
 
 
 ## Citation
