@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+   #!/usr/bin/env python3
 """
 Standalone test client for socket_so101.py — no Isaac Sim required.
 
